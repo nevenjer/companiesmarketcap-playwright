@@ -1,0 +1,10 @@
+{
+    "source": "CompaniesMarketCap",
+    "ranking": "Market Cap",
+    "lastRun": "2026-09-25T18:23:44.350Z",
+    "pagesScraped": 114,
+    "recordsScraped": 11341,
+    "uniqueCompanies": 11341,
+    "duplicates": 0,
+    "status": "success"
+}
