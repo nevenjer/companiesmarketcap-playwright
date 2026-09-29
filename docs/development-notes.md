@@ -6,7 +6,7 @@ The goal of this project was to build an automated and reusable data collection 
 
 The project was not designed as a simple web scraper.
 
-The main objective was to create a reliable dataset that could later be used by:
+The main objective was to create a reliable and reusable dataset that can serve as an input for:
 
 * SQL Server
 * R
@@ -21,14 +21,22 @@ CompaniesMarketCap
         ↓
 Playwright + TypeScript
         ↓
-Company Symbol Dataset
+Company Data Extraction
+        ↓
+Validation & Deduplication
         ↓
 JSON Storage
         ↓
-Future SQL Server
+SQL Server
+        ↓
+Database Validation
+        ↓
+Future Market Data Pipeline
         ↓
 R / Financial Data Analysis
 ```
+
+The pipeline is designed so that the number of companies and historical records can change over time without requiring changes to the core validation rules.
 
 ---
 
@@ -73,10 +81,14 @@ Validate the pipeline
    ↓
 Test idempotency
    ↓
+Integrate SQL Server
+   ↓
 Final reusable dataset
 ```
 
 This approach helped me understand the system before optimizing the implementation.
+
+The project was developed incrementally so that each stage could be tested before moving to the next stage.
 
 ---
 
@@ -90,6 +102,7 @@ The first step was to verify that Playwright could open CompaniesMarketCap succe
 import { test, expect } from '@playwright/test';
 
 test('Open CompaniesMarketCap', async ({ page }) => {
+
     await page.goto('/');
 
     await expect(page).toHaveTitle(
@@ -123,10 +136,13 @@ I created a Page Object and checked whether the Market Cap option was active.
 import { Page, Locator } from '@playwright/test';
 
 export class CompaniesMarketCapPage {
+
     readonly page: Page;
+
     readonly marketCapOption: Locator;
 
     constructor(page: Page) {
+
         this.page = page;
 
         this.marketCapOption = page
@@ -135,14 +151,17 @@ export class CompaniesMarketCapPage {
     }
 
     async open(): Promise<void> {
+
         await this.page.goto('/');
     }
 
     async isMarketCapActive(): Promise<boolean> {
+
         return await this.marketCapOption.evaluate((element) =>
             element.classList.contains('active')
         );
     }
+
 }
 ```
 
@@ -151,6 +170,8 @@ export class CompaniesMarketCapPage {
 The scraper should not silently collect data from the wrong ranking.
 
 I therefore added an explicit validation step before starting the full scraping process.
+
+This makes the scraper less dependent on assumptions about the default website state.
 
 ---
 
@@ -162,10 +183,13 @@ The first experiment was simply to print the row content.
 
 ```ts
 async getFirstCompany(): Promise<void> {
+
     const firstRow = this.companyRows.first();
 
     console.log('First row text:');
+
     console.log(await firstRow.innerText());
+
 }
 ```
 
@@ -190,6 +214,7 @@ The next step was to inspect every table cell.
 
 ```ts
 async getFirstCompany(): Promise<void> {
+
     const firstRow = this.companyRows.first();
 
     const cells = firstRow.locator('td');
@@ -197,11 +222,14 @@ async getFirstCompany(): Promise<void> {
     console.log('Number of cells:', await cells.count());
 
     for (let i = 0; i < await cells.count(); i++) {
+
         console.log(
             `Cell ${i}:`,
             await cells.nth(i).innerText()
         );
+
     }
+
 }
 ```
 
@@ -219,6 +247,8 @@ Cell 7 → Country
 
 Other cells contained information that was not required for this dataset.
 
+The exact DOM structure is treated as an implementation detail and may require adjustment if the source website changes.
+
 ---
 
 # 7. Build the First Company Object
@@ -232,6 +262,7 @@ async getFirstCompany(): Promise<{
     symbol: string;
     country: string;
 }> {
+
     const firstRow = this.companyRows.first();
 
     const cells = firstRow.locator('td');
@@ -290,6 +321,7 @@ I then created an automated test to verify the extracted values.
 
 ```ts
 test('Get first company', async ({ page }) => {
+
     const companiesMarketCapPage =
         new CompaniesMarketCapPage(page);
 
@@ -307,12 +339,15 @@ test('Get first company', async ({ page }) => {
     expect(company.name).toBe('NVIDIA');
     expect(company.symbol).toBe('NVDA');
     expect(company.country).toBe('USA');
+
 });
 ```
 
 ### Why this test mattered
 
 Before scaling the scraper, I wanted to prove that the extraction logic was correct for a known record.
+
+This reduced the debugging scope before introducing pagination and large-scale extraction.
 
 ---
 
@@ -324,12 +359,15 @@ The initial implementation used a loop through each row.
 
 ```ts
 const rows = this.companyRows;
+
 const rowCount = await rows.count();
 
 const companies = [];
 
 for (let i = 0; i < rowCount; i++) {
+
     const row = rows.nth(i);
+
     const cells = row.locator('td');
 
     const rank = Number(
@@ -349,7 +387,8 @@ for (let i = 0; i < rowCount; i++) {
     ).trim();
 
     const country = (
-        await cells.nth(7).innerText()
+        await cells.nth(7)
+            .innerText()
     ).trim();
 
     companies.push({
@@ -358,18 +397,24 @@ for (let i = 0; i < rowCount; i++) {
         symbol,
         country,
     });
+
 }
 ```
 
 ### Validation
 
-The first page was expected to contain 100 companies.
+During development, the page-size expectation was used as an exploratory validation.
 
-```ts
-expect(companies.length).toBe(100);
-```
+The important principle is not that every future page must contain a fixed number of records.
 
-This confirmed that the scraper could scale from one record to a complete page.
+The important principle is that:
+
+* Valid company rows are extracted.
+* Non-company rows are ignored.
+* Extracted records contain the required fields.
+* The scraper detects unexpected page structures.
+
+This makes the validation more resilient to future changes in the source dataset.
 
 ---
 
@@ -379,14 +424,14 @@ During investigation, I discovered that the table did not contain only company r
 
 The DOM contained more rows than expected because advertisement rows were also present.
 
-For example:
+For example, an exploratory page could contain:
 
 ```text
 Expected:
-100 company rows
+Company rows
 
 Actual DOM:
-102 rows
+Company rows + non-company rows
 ```
 
 This was an important real-world scraping problem.
@@ -395,8 +440,11 @@ The solution was to validate the row structure before extracting data.
 
 ```ts
 // Skip non-company rows such as advertisements.
+
 if (cells.length < 8) {
+
     continue;
+
 }
 ```
 
@@ -413,6 +461,8 @@ Real websites may contain:
 * Other non-data rows
 
 The scraper therefore checks the structure before processing each row.
+
+This is an example of defensive scraping.
 
 ---
 
@@ -449,6 +499,8 @@ This is an important scraping principle:
 
 > Prefer stable machine-readable attributes when they are available instead of relying only on visible text.
 
+This also reduces the risk of accidentally parsing ranking movement information as part of the rank value.
+
 ---
 
 # 12. Improve Extraction Performance
@@ -459,14 +511,19 @@ After understanding the DOM, I moved the extraction into the browser context usi
 
 ```ts
 const companies = await rows.evaluateAll((rowElements) => {
+
     const results = [];
 
     for (const row of rowElements) {
+
         const cells = row.querySelectorAll('td');
 
         // Skip non-company rows such as advertisements.
+
         if (cells.length < 8) {
+
             continue;
+
         }
 
         const rankValue =
@@ -479,6 +536,7 @@ const companies = await rows.evaluateAll((rowElements) => {
             cells[2].querySelector('.company-code');
 
         const rank = Number(rankValue);
+
         const name =
             nameElement?.textContent?.trim() ?? '';
 
@@ -494,9 +552,11 @@ const companies = await rows.evaluateAll((rowElements) => {
             symbol,
             country,
         });
+
     }
 
     return results;
+
 });
 ```
 
@@ -508,6 +568,8 @@ The extraction became:
 * Easier to reason about
 * Less dependent on repeated Playwright locator calls
 * Better suited for processing many rows
+
+The optimization was introduced only after the DOM structure was understood.
 
 ---
 
@@ -537,15 +599,18 @@ I then implemented pagination using the actual `href`.
 
 ```ts
 async goToNextPage(): Promise<void> {
+
     await this.acceptPrivacy();
 
     const nextPageUrl =
         await this.nextPageLink.getAttribute('href');
 
     if (!nextPageUrl) {
+
         throw new Error(
             'Next page URL was not found.'
         );
+
     }
 
     const nextPageAbsoluteUrl =
@@ -557,8 +622,11 @@ async goToNextPage(): Promise<void> {
             waitUntil: 'domcontentloaded',
         }
     );
+
 }
 ```
+
+Using the actual link destination makes the pagination logic less dependent on a hard-coded page count.
 
 ---
 
@@ -568,6 +636,7 @@ The scraper then repeatedly collected pages until there was no next page.
 
 ```ts
 while (true) {
+
     const companies =
         await companiesMarketCapPage
             .getCompaniesFromCurrentPage();
@@ -578,12 +647,15 @@ while (true) {
         await companiesMarketCapPage.hasNextPage();
 
     if (!hasNext) {
+
         break;
+
     }
 
     await companiesMarketCapPage.goToNextPage();
 
     pageNumber++;
+
 }
 ```
 
@@ -592,6 +664,8 @@ while (true) {
 The scraper does not depend on a fixed number of pages.
 
 It continues until the website reports that there is no next page.
+
+This is important because the source dataset can grow or shrink over time.
 
 ---
 
@@ -609,13 +683,17 @@ I therefore added explicit handling:
 
 ```ts
 async acceptPrivacy(): Promise<void> {
+
     if (await this.privacyDialog.isVisible()) {
+
         await this.privacyAgreeButton.click();
 
         await this.privacyDialog.waitFor({
             state: 'hidden',
         });
+
     }
+
 }
 ```
 
@@ -651,10 +729,15 @@ The Page Object contains responsibilities such as:
 
 ```text
 open()
+
 isMarketCapActive()
+
 getCompaniesFromCurrentPage()
+
 hasNextPage()
+
 goToNextPage()
+
 acceptPrivacy()
 ```
 
@@ -680,6 +763,8 @@ This makes the project easier to:
 * Debug
 * Extend
 
+The Page Object also provides a single place to update when the website structure changes.
+
 ---
 
 # 17. Scraper Service
@@ -688,8 +773,11 @@ After the Page Object became stable, I moved the complete scraping workflow into
 
 ```ts
 export interface ScrapeResult {
+
     companies: Company[];
+
     metadata: ScrapeMetadata;
+
 }
 ```
 
@@ -705,6 +793,22 @@ The scraper service is responsible for:
 
 This separates browser interaction from the overall scraping workflow.
 
+The result is a clearer separation between:
+
+```text
+Page Object
+    ↓
+Website interaction
+
+Scraper Service
+    ↓
+Workflow orchestration
+
+Storage
+    ↓
+Data persistence
+```
+
 ---
 
 # 18. Data Model
@@ -713,11 +817,17 @@ I created explicit TypeScript interfaces.
 
 ```ts
 export interface Company {
+
     rank: number;
+
     name: string;
+
     symbol: string;
+
     country: string;
+
     lastUpdated: string;
+
 }
 ```
 
@@ -725,11 +835,17 @@ Historical ranking:
 
 ```ts
 export interface RankingHistory {
+
     rank: number;
+
     name: string;
+
     symbol: string;
+
     country: string;
+
     date: string;
+
 }
 ```
 
@@ -737,14 +853,23 @@ Scraping metadata:
 
 ```ts
 export interface ScrapeMetadata {
+
     source: string;
+
     ranking: string;
+
     lastRun: string;
+
     pagesScraped: number;
+
     recordsScraped: number;
+
     uniqueCompanies: number;
+
     duplicates: number;
+
     status: 'success' | 'failed';
+
 }
 ```
 
@@ -753,6 +878,8 @@ export interface ScrapeMetadata {
 The data structure became explicit instead of being an unstructured collection of objects.
 
 This also allows TypeScript to detect incorrect data usage during development.
+
+The interfaces describe the data structure, while validation determines whether the actual values are acceptable.
 
 ---
 
@@ -764,7 +891,7 @@ The main dataset is stored in:
 data/companies.json
 ```
 
-The master dataset uses the company symbol as the primary identity.
+The master dataset uses the company symbol as the logical identity.
 
 The storage logic uses a `Map`:
 
@@ -779,10 +906,12 @@ New records are then applied.
 
 ```ts
 for (const company of newCompanies) {
+
     companiesBySymbol.set(
         company.symbol,
         company
     );
+
 }
 ```
 
@@ -808,6 +937,8 @@ Existing historical company → Keep
 
 This makes the master dataset reusable across multiple runs.
 
+The master dataset therefore represents the latest known company information while preserving companies that were previously collected.
+
 ---
 
 # 20. Duplicate Prevention
@@ -827,15 +958,29 @@ const duplicates =
     uniqueSymbols.size;
 ```
 
-The final dataset was validated with:
+### Validation Rule
+
+The master dataset must maintain a unique company symbol for each company.
+
+The validation therefore checks:
+
+* Total records
+* Unique symbols
+* Duplicate symbols
+
+The expected number of companies is **not hard-coded** because the dataset may grow or change over time.
+
+The important condition is:
 
 ```text
-Total companies: 11,340
-Unique symbols: 11,340
-Duplicate symbols: 0
+Total records
+      =
+Unique symbols
+      +
+Duplicate records
 ```
 
-This confirmed that each company symbol appeared only once in the master dataset.
+A successful validation should report zero duplicate symbols in the master dataset.
 
 ---
 
@@ -847,10 +992,10 @@ The project also stores ranking snapshots separately:
 data/ranking_history.json
 ```
 
-The historical identity is:
+The logical identity of a historical ranking record is:
 
 ```text
-date + symbol
+ranking_date + symbol
 ```
 
 For example:
@@ -859,45 +1004,84 @@ For example:
 2026-09-25 + NVDA
 ```
 
-This allows the same company to appear again on a future date without creating duplicates for the same date.
+This allows the same company to appear again on a future date without treating it as a duplicate historical observation.
 
 ### Example
 
 ```text
 2026-09-25 | NVDA | Rank 1
+
 2026-09-26 | NVDA | Rank 2
 ```
 
 This preserves historical ranking changes.
 
+The historical dataset therefore grows as new ranking dates are collected.
+
 ---
 
 # 22. Idempotency
 
-One important requirement was that running the same workflow twice on the same day should not create duplicate historical records.
+One important requirement was that processing the same logical ranking observation should not create duplicate historical observations.
 
-The storage logic uses:
+The storage logic uses a logical key based on:
 
 ```ts
 const key =
     `${date}_${company.symbol}`;
 ```
 
-The result is:
+### Idempotency Rule
+
+The logical identity of a historical record is:
 
 ```text
-First run:
-11,340 records
-
-Same-day rerun:
-11,340 records
-
-No duplicate date + symbol records
+ranking_date + symbol
 ```
 
-A future date creates a new historical snapshot.
+Therefore:
 
-This demonstrates idempotent data processing.
+```text
+Existing date + symbol
+        ↓
+Same logical observation
+
+New date + symbol
+        ↓
+New historical snapshot
+```
+
+For example:
+
+```text
+2026-09-25 + NVDA
+```
+
+and:
+
+```text
+2026-09-26 + NVDA
+```
+
+are two different historical observations.
+
+The same:
+
+```text
+2026-09-25 + NVDA
+```
+
+should not be represented twice in the logical historical dataset.
+
+### Important implementation note
+
+The current SQL Server table also has QA queries that detect duplicate `symbol + ranking_date` combinations.
+
+The current database schema does not yet enforce this combination with a database-level unique constraint.
+
+Therefore, uniqueness is currently treated as a **data validation rule and application-level logical identity**, rather than as a SQL constraint.
+
+This distinction is intentional and leaves room for future database hardening.
 
 ---
 
@@ -915,14 +1099,16 @@ Example:
 {
     "source": "CompaniesMarketCap",
     "ranking": "Market Cap",
-    "lastRun": "2026-09-25T11:59:25.248Z",
+    "lastRun": "2026-09-29T09:09:54.071Z",
     "pagesScraped": 114,
-    "recordsScraped": 11340,
-    "uniqueCompanies": 11340,
+    "recordsScraped": 11342,
+    "uniqueCompanies": 11342,
     "duplicates": 0,
     "status": "success"
 }
 ```
+
+The values in this example are execution-specific and should be treated as a snapshot, not as permanent project requirements.
 
 ### Why metadata is useful
 
@@ -931,6 +1117,8 @@ The dataset contains the business data.
 The metadata describes the execution that produced the dataset.
 
 This makes the pipeline easier to audit and validate.
+
+Metadata can also be used in future monitoring and scheduled pipeline execution.
 
 ---
 
@@ -943,56 +1131,147 @@ It also validates the result.
 Validation includes:
 
 ```text
-Page count
-Record count
-Rank uniqueness
+Page processing status
+
+Record extraction
+
+Required field validation
+
+Rank validity
+
 Symbol uniqueness
+
 Duplicate detection
+
 Ranking history integrity
-Cross-file consistency
+
+Cross-dataset consistency
+
 Metadata integrity
+
+Database integrity
 ```
 
-For the completed run:
+### Validation Philosophy
+
+The validation logic does not depend on a fixed number of companies or pages.
+
+For example, the test should verify:
 
 ```text
-Pages scraped:       114
-Companies scraped:   11,340
-Unique companies:    11,340
-Duplicate symbols:   0
-Duplicate ranks:     0
+Company symbols are unique
 ```
+
+rather than:
+
+```text
+Expected companies = fixed number
+```
+
+Similarly, pagination should verify that:
+
+```text
+All available pages were processed
+```
+
+rather than:
+
+```text
+Expected pages = fixed number
+```
+
+This allows the same validation framework to continue working as the source dataset grows or changes.
 
 ---
 
-# 25. Cross-File Validation
+# 25. Cross-Dataset Validation
 
-The current ranking snapshot was also compared with the master dataset.
+The current ranking snapshot is compared with the master company dataset.
 
-Validation result:
+For each ranking record, the pipeline verifies that the company symbol exists in the master dataset.
+
+The validation rule is:
 
 ```text
-Today ranking records:       11,340
-Missing from companies.json: 0
+Ranking-history symbol
+        ↓
+must exist in
+        ↓
+Company master dataset
 ```
 
-This verifies that the current ranking snapshot and master company dataset are consistent.
+The validation checks for missing symbols rather than expecting a fixed record count.
+
+This allows the check to remain valid as:
+
+* New companies are added
+* Company information changes
+* Ranking dates increase
+* Historical records accumulate
+
+The same principle is applied to the SQL Server representation of the datasets.
 
 ---
 
-# 26. Final Dataset
+# 26. Dataset Snapshot
 
-The completed scraping run produced:
+The datasets generated by this project are continuously updated.
+
+Therefore, dataset size should be treated as a **snapshot of a specific execution**, not as a permanent project value.
+
+### Current validation snapshot
+
+As of **2026-09-29**, the SQL Server database contains:
 
 ```text
-114 pages
-11,340 companies
-11,340 unique symbols
-0 duplicate symbols
-0 duplicate ranks
+Company master:
+11,342 records
+
+Ranking history:
+22,683 records
 ```
 
-Example record:
+Ranking-history coverage currently includes:
+
+```text
+2026-09-25 → 11,341 records
+
+2026-09-29 → 11,342 records
+```
+
+Current QA results:
+
+```text
+Duplicate company symbols:          0
+
+Duplicate symbol + date records:    0
+
+NULL values in Company:             0
+
+NULL values in Ranking History:     0
+
+Missing ranking ranks:               0
+
+Ranking symbols missing from
+Company master:                      0
+```
+
+These values represent the database state at the time of this development snapshot.
+
+They are **not fixed requirements or maximum limits**.
+
+Future scraping runs may produce:
+
+* More companies
+* Fewer companies
+* New ranking dates
+* New companies
+* Updated company information
+* More historical records
+
+The project does not assume a fixed maximum dataset size.
+
+### Example record
 
 ```json
 {
@@ -1000,11 +1279,11 @@ Example record:
     "name": "NVIDIA",
     "symbol": "NVDA",
     "country": "USA",
-    "lastUpdated": "2026-09-25T11:59:25.248Z"
+    "lastUpdated": "2026-09-29T09:09:54.071Z"
 }
 ```
 
-The dataset can now be reused by other parts of a future data pipeline.
+The dataset can now be reused by other parts of the larger data pipeline.
 
 ---
 
@@ -1025,13 +1304,13 @@ Inspect first row
       ↓
 Extract first company
       ↓
-Extract 100 companies
+Extract page data
       ↓
 Test pagination
       ↓
 Scrape multiple pages
       ↓
-Scrape all companies
+Scrape complete available dataset
       ↓
 Validate duplicates
       ↓
@@ -1044,9 +1323,15 @@ Test ranking history
 Test idempotency
       ↓
 Validate metadata
+      ↓
+Import into SQL Server
+      ↓
+Validate database
 ```
 
 This reflects how I actually developed the solution rather than only presenting the final code.
+
+The test strategy focuses on behavior and data integrity rather than fixed dataset size.
 
 ---
 
@@ -1063,7 +1348,7 @@ Examples included:
 * Inspecting pagination
 * Inspecting privacy dialogs
 * Testing the first company object
-* Testing 100-row extraction
+* Testing page-level extraction
 
 These experiments were useful during development, but they do not all belong in the final production source.
 
@@ -1114,10 +1399,14 @@ It shows how I:
 * Added historical tracking
 * Added validation
 * Tested idempotency
+* Integrated SQL Server
+* Added database-level QA checks
 
 The important engineering lesson was:
 
 > The final solution was built through investigation and iteration, not by assuming the website structure from the beginning.
+
+This development history is therefore part of the project's engineering documentation, not just a record of failed experiments.
 
 ---
 
@@ -1127,6 +1416,7 @@ The experimental code should not remain as large commented blocks inside:
 
 ```text
 src/pages/CompaniesMarketCapPage.ts
+
 tests/companiesmarketcap.spec.ts
 ```
 
@@ -1154,6 +1444,7 @@ Temporary code such as:
 
 ```ts
 console.log('First row text:');
+
 console.log(await firstRow.innerText());
 ```
 
@@ -1171,6 +1462,8 @@ console.log('Total DOM rows:', rowCount);
 
 should be documented here because they describe the investigation process.
 
+The final source code should focus on the reusable solution rather than the complete history of debugging.
+
 ---
 
 # 31. Final Project Architecture
@@ -1179,7 +1472,7 @@ The final project is organized as:
 
 ```text
 companiesmarketcap-playwright/
-│
+
 ├── data/
 │   ├── companies.json
 │   ├── ranking_history.json
@@ -1188,12 +1481,22 @@ companiesmarketcap-playwright/
 ├── docs/
 │   └── development-notes.md
 │
+├── sql/
+│   ├── 0_queries.sql
+│   ├── 1_create_database.sql
+│   ├── 2_create_company.sql
+│   └── 3_create_company_ranking_history.sql
+│
 ├── src/
 │   ├── config/
 │   │   └── config.ts
 │   │
 │   ├── pages/
 │   │   └── CompaniesMarketCapPage.ts
+│   │
+│   ├── scripts/
+│   │   ├── import_companies.ts
+│   │   └── import_ranking_history.ts
 │   │
 │   ├── services/
 │   │   ├── scraper.ts
@@ -1212,12 +1515,31 @@ companiesmarketcap-playwright/
 ├── tsconfig.json
 ├── package.json
 ├── package-lock.json
-└── README.md
+├── README.md
+└── Structure_Project_18.txt
 ```
+
+The architecture separates:
+
+```text
+Data
+Documentation
+Database scripts
+Browser interaction
+Scraping workflow
+Import scripts
+Data types
+Utilities
+Tests
+```
+
+This separation makes the project easier to maintain and extend.
 
 ---
 
 # 32. Technology Stack
+
+### Current Technology Stack
 
 ```text
 TypeScript
@@ -1227,19 +1549,58 @@ Node.js
 HTML / DOM
 CSS Selectors
 JSON
+SQL Server
+Docker
 Git / GitHub
 ```
 
-Future integration:
+### Current Data Pipeline
+
+```text
+CompaniesMarketCap
+        ↓
+Playwright
+        ↓
+Company Data Extraction
+        ↓
+JSON Storage
+        ↓
+SQL Server
+        ↓
+Database QA Validation
+```
+
+### Current Database
+
+```text
+CompaniesMarketCapDB
+
+├── dbo.Company
+│   └── Current company master data
+│
+└── dbo.CompanyRankingHistory
+    └── Historical ranking snapshots
+```
+
+### Future Data Pipeline
 
 ```text
 SQL Server
+      ↓
+Market Data Collection
+      ↓
+Historical Market Data
+      ↓
 R
-Financial Market Data APIs
-Data Analysis
+      ↓
+Technical Indicators
+      ↓
+Quantitative Analysis
 ```
 
-SQL Server and R are planned downstream integrations and are not presented as completed components of this scraper project.
+SQL Server is already implemented in the current project.
+
+R-based market-data processing and quantitative analysis are planned extensions.
 
 ---
 
@@ -1255,6 +1616,8 @@ This project demonstrates practical experience with:
 * Locator design
 * DOM inspection
 * Pagination
+* Dynamic page handling
+* Privacy-dialog handling
 
 ### Programming
 
@@ -1275,7 +1638,8 @@ This project demonstrates practical experience with:
 * Upsert logic
 * Historical snapshots
 * Metadata
-* Idempotent processing
+* Logical idempotency
+* SQL Server integration
 
 ### Software Testing
 
@@ -1284,6 +1648,7 @@ This project demonstrates practical experience with:
 * Edge-case handling
 * Integration workflow testing
 * Data integrity checks
+* Database validation
 
 ### Problem Solving
 
@@ -1317,31 +1682,37 @@ It is a small automated data collection pipeline with:
 
 ```text
 Source validation
-+
+        +
 DOM extraction
-+
+        +
 Pagination
-+
+        +
 Edge-case handling
-+
+        +
 Reusable architecture
-+
+        +
 Structured data models
-+
-Persistent storage
-+
+        +
+JSON storage
+        +
+SQL Server storage
+        +
 Duplicate prevention
-+
+        +
 Historical tracking
-+
+        +
 Metadata
-+
+        +
 Automated validation
-+
-Idempotency
+        +
+Database QA
+        +
+Idempotency logic
 ```
 
 The result is a reusable company-symbol dataset that can serve as an input for future financial-data workflows.
+
+The project also provides a foundation for expanding from company ranking data into larger market-data pipelines.
 
 ---
 
@@ -1365,9 +1736,12 @@ The extraction process evolved from:
 
 ```text
 1 row
-→ 100 rows
-→ multiple pages
-→ complete dataset
+   ↓
+Page data
+   ↓
+Multiple pages
+   ↓
+Complete available dataset
 ```
 
 ### Lesson 5 — Data quality is part of automation
@@ -1378,8 +1752,11 @@ The result must also be:
 
 ```text
 validated
+
 consistent
+
 deduplicated
+
 reusable
 ```
 
@@ -1389,22 +1766,203 @@ The project became easier to maintain after separating:
 
 ```text
 Page interaction
+
 Scraping workflow
+
 Data storage
+
+Database scripts
+
 Data types
+
 Utilities
+
 Tests
 ```
 
 ### Lesson 7 — Idempotency matters
 
-Running the same process again should not create duplicate historical records.
+The same logical historical observation should not create duplicate historical records.
+
+### Lesson 8 — Do not hard-code changing business data
+
+The number of companies, pages, and historical records can change over time.
+
+Therefore, validation should focus on data-quality rules rather than fixed dataset sizes.
+
+### Lesson 9 — Separate current state from historical state
+
+The master dataset represents current company information.
+
+The ranking-history dataset preserves observations over time.
+
+This allows the dataset to grow without losing historical information.
+
+### Lesson 10 — Database validation is part of the pipeline
+
+Moving data into SQL Server is not the end of the process.
+
+The database must also be checked for:
+
+* Row counts
+* Duplicate symbols
+* Duplicate historical keys
+* NULL values
+* Ranking coverage
+* Cross-table consistency
 
 ---
 
-# 36. Future Development
+# 36. Dataset Growth Strategy
 
-Possible future extensions include:
+The project is designed for continuous data growth.
+
+The number of companies and historical records is expected to change over time as new scraping runs are performed.
+
+The system therefore separates current state from historical state.
+
+### Master Dataset
+
+```text
+data/companies.json
+```
+
+The master dataset represents the latest known company information.
+
+The logical identity is:
+
+```text
+symbol
+```
+
+A symbol should appear only once in the master dataset.
+
+If the company already exists:
+
+```text
+Existing symbol
+      ↓
+Update current information
+```
+
+If a new company appears:
+
+```text
+New symbol
+      ↓
+Add to master dataset
+```
+
+If a previously known company does not appear in the latest ranking:
+
+```text
+Historical company
+      ↓
+Keep existing master record
+```
+
+The exact storage behavior may evolve as the data model becomes more sophisticated, but the core principle is to avoid losing previously collected information unnecessarily.
+
+### Historical Dataset
+
+```text
+data/ranking_history.json
+```
+
+The historical dataset preserves ranking observations over time.
+
+The logical identity is:
+
+```text
+ranking_date + symbol
+```
+
+The same company can therefore appear many times across different dates.
+
+Example:
+
+```text
+Date         Symbol    Rank
+
+2026-09-25   NVDA      1
+2026-09-26   NVDA      2
+2026-09-27   NVDA      1
+```
+
+### Growth Model
+
+```text
+New company
+    ↓
+Add to master dataset
+    ↓
+Add historical snapshot
+```
+
+```text
+Existing company
+    ↓
+Update master information
+    ↓
+Add new historical snapshot for a new date
+```
+
+```text
+Company no longer appears
+    ↓
+Keep historical records
+    ↓
+Do not automatically delete history
+```
+
+This design allows the dataset to grow without losing historical information.
+
+### Validation Philosophy
+
+The project avoids hard-coded dataset-size expectations.
+
+Instead of:
+
+```text
+Expected companies = 11,342
+```
+
+the validation focuses on:
+
+```text
+Symbols are unique
+Required fields are valid
+Ranks are valid
+Historical keys are unique
+Ranking snapshots are complete
+Cross-dataset relationships are valid
+```
+
+This allows the same validation framework to remain useful as the dataset grows.
+
+---
+
+# 37. Future Development
+
+The current project provides the foundation for a larger financial data pipeline.
+
+The current implementation already includes:
+
+```text
+CompaniesMarketCap
+        ↓
+Playwright
+        ↓
+Company Symbol Dataset
+        ↓
+JSON
+        ↓
+SQL Server
+        ↓
+Database Validation
+```
+
+The planned development direction is:
 
 ```text
 CompaniesMarketCap
@@ -1417,6 +1975,8 @@ SQL Server
         ↓
 Market Data Collection
         ↓
+Historical Market Data
+        ↓
 R
         ↓
 Technical Indicators
@@ -1424,33 +1984,38 @@ Technical Indicators
 Quantitative Analysis
 ```
 
-Possible future improvements:
+Possible future improvements include:
 
-* SQL Server integration
 * Automated scheduled scraping
 * API-based market data collection
-* Data quality monitoring
 * Historical ranking analysis
+* Market data storage
+* Data quality monitoring
 * Automated reporting
 * CI/CD execution
 * GitHub Actions
-* Database validation
-* Data pipeline monitoring
+* Pipeline monitoring
+* Performance optimization
+* Large-scale historical data processing
+* Database constraints for stronger data integrity
+* More efficient bulk database loading
 
 These are future extensions and are intentionally not presented as completed features.
 
 ---
 
-# 37. Portfolio Summary
+# 38. Portfolio Summary
 
 This project demonstrates how I approached a real data collection problem from investigation to implementation.
 
-I started by exploring the website and understanding its DOM structure. I then developed the solution incrementally, from extracting one company to processing the complete ranking.
+I started by exploring the website and understanding its DOM structure. I then developed the solution incrementally, from extracting one company to processing the complete available ranking.
 
-During development, I encountered real-world issues such as advertisement rows, ranking presentation differences, pagination, and privacy dialogs. I handled these issues through investigation, validation, and refactoring.
+During development, I encountered real-world issues such as advertisement rows, ranking presentation differences, pagination, privacy dialogs, and changing source data. I handled these issues through investigation, validation, and refactoring.
 
-The final solution uses TypeScript and Playwright with Page Object Model, reusable services, structured data models, JSON storage, duplicate prevention, historical ranking tracking, metadata, automated validation, and idempotency testing.
+The final solution uses TypeScript and Playwright with Page Object Model, reusable services, structured data models, JSON storage, duplicate prevention, historical ranking tracking, metadata, automated validation, SQL Server integration, database QA, and logical idempotency.
 
-The main outcome is a reusable company-symbol dataset that can later provide input to SQL Server, R, and financial-data analysis workflows.
+The project is designed so that the number of companies and historical records can increase over time without requiring fixed record-count assumptions in the validation logic.
 
-> The goal was not simply to scrape a website. The goal was to build a reliable and reusable data input for a larger data pipeline.
+The main outcome is a reusable company-symbol dataset that provides an input layer for SQL Server and future R-based financial-data analysis workflows.
+
+> The goal was not simply to scrape a website. The goal was to build a reliable, reusable, and extensible data input layer for a larger data pipeline.

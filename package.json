@@ -7,7 +7,9 @@
     "test": "playwright test",
     "test:headed": "playwright test --headed",
     "test:debug": "playwright test --debug",
-    "scrape": "tsx tests/companiesmarketcap.spec.ts"
+    "scrape": "tsx tests/companiesmarketcap.spec.ts",
+    "import:companies": "tsx src/scripts/import_companies.ts",
+    "import:ranking": "tsx src/scripts/import_ranking_history.ts"
   },
   "keywords": [],
   "author": "",
@@ -15,8 +17,12 @@
   "type": "commonjs",
   "devDependencies": {
     "@playwright/test": "^1.63.0",
+    "@types/mssql": "^12.3.0",
     "@types/node": "^26.6.2",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2"
+  },
+  "dependencies": {
+    "mssql": "^12.7.2"
   }
 }

@@ -1,0 +1,47 @@
+companiesmarketcap-playwright/
+│
+├── data/
+│   ├── companies.json
+│   ├── ranking_history.json
+│   └── scrape_metadata.json
+│
+├── docs/
+│   └── development-notes.md
+│
+├── sql/
+│   ├── 0_queries.sql
+│   ├── 1_create_database.sql
+│   ├── 2_create_company.sql
+│   └── 3_create_company_ranking_history.sql
+│
+├── src/
+│   ├── config/
+│   │   └── config.ts
+│   │
+│   ├── pages/
+│   │   └── CompaniesMarketCapPage.ts
+│   │
+│   ├── scripts/
+│   │   ├── import_companies.ts
+│   │   └── import_ranking_history.ts
+│   │
+│   ├── services/
+│   │   ├── scraper.ts
+│   │   └── storage.ts
+│   │
+│   ├── types/
+│   │   └── company.ts
+│   │
+│   └── utils/
+│       └── dateTime.ts
+│
+├── tests/
+│   └── companiesmarketcap.spec.ts
+│
+├── .gitignore
+├── package-lock.json
+├── package.json
+├── playwright.config.ts
+├── README.md
+├── Structure_Project_18.txt
+└── tsconfig.json
