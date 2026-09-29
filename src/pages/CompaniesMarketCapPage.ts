@@ -144,11 +144,46 @@ export class CompaniesMarketCapPage {
         const nextPageAbsoluteUrl =
             new URL(nextPageUrl, this.page.url()).href;
 
-        await this.page.goto(nextPageAbsoluteUrl, {
-            waitUntil: 'domcontentloaded',
-        });
-    }
+        const maxRetries = 3;
 
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+            try {
+                console.log(
+                    `Navigating to next page (attempt ${attempt}/${maxRetries}):`,
+                    nextPageAbsoluteUrl
+                );
+
+                await this.page.goto(nextPageAbsoluteUrl, {
+                    waitUntil: 'domcontentloaded',
+                    timeout: 30_000,
+                });
+
+                return;
+
+            } catch (error) {
+                const message =
+                    error instanceof Error
+                        ? error.message
+                        : String(error);
+
+                console.warn(
+                    `Navigation failed (attempt ${attempt}/${maxRetries}): ${message}`
+                );
+
+                if (attempt === maxRetries) {
+                    throw error;
+                }
+
+                const delay = attempt * 2_000;
+
+                console.log(
+                    `Retrying in ${delay / 1000} seconds...`
+                );
+
+                await this.page.waitForTimeout(delay);
+            }
+        }
+    }
 
     async inspectPrivacyDialog(): Promise<void> {
         console.log(
