@@ -1,6 +1,41 @@
+# Node.js
 node_modules/
+
+# Playwright
 test-results/
 playwright-report/
+blob-report/
+playwright/.cache/
+
+# Environment / secrets
 .env
 .env.*
 !.env.example
+
+# Playwright authentication
+storage/
+storageState/
+auth/
+*.auth.json
+storageState.json
+state.json
+cookies.json
+
+# Test artifacts
+screenshots/
+traces/
+videos/
+
+# R session files
+.RData
+.Rhistory
+.Rproj.user/
+
+# Logs
+*.log
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

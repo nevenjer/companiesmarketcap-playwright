@@ -10,12 +10,19 @@ interface RankingHistory {
   date: string;
 }
 
+// Read SQL Server password from environment
+const password = process.env.MSSQL_SA_PASSWORD;
+
+if (!password) {
+  throw new Error("MSSQL_SA_PASSWORD is not set.");
+}
+
 const config: sql.config = {
   server: "localhost",
   port: 8888,
   database: "CompaniesMarketCapDB",
   user: "sa",
-  password: "YOUR_SQL_PASSWORD",
+  password,
   options: {
     encrypt: false,
     trustServerCertificate: true,
